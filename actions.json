@@ -1,0 +1,14 @@
+{
+    "actions":[
+        {
+            "name":"chop up",
+            "skill":"Woodcutting"
+        }
+    ],
+    "mine_forward":[
+        {
+            "name":"mine",
+            "skill":"Mining"
+        }
+    ]
+}

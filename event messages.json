@@ -1,0 +1,26 @@
+{
+    "start_messages":[
+        {
+            "line":"You start to chop up the felled tree.",
+            "action":"chop_up"
+        },
+        {
+            "line":"You start to mine.",
+            "action":"mine"
+        }
+    ],
+    "end_messages":[
+        {
+            "line":"You create a smaller log from the felled tree.",
+            "action":"chop_up"
+        },
+        {
+            "line":"You mine some ore.",
+            "action":"mine"
+        },
+        {
+            "line":"You mine some stone shards.",
+            "action":"mine"
+        }
+    ]
+}

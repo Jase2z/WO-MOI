@@ -1,0 +1,39 @@
+{
+    "skills":[
+        {
+            "name":"Body",
+            "parent":"None",
+            "Characteristics":["None"]
+        },
+        {
+            "name":"Body strength",
+            "parent":"Body",
+            "Characteristics":["None"]
+        },
+        {
+            "name":"Body stamina",
+            "parent":"Body",
+            "Characteristics":["None"]
+        },
+        {
+            "name":"Woodcutting",
+            "parent":"None",
+            "Characteristics": ["Body strength", "Body stamina"]
+        },
+        {
+            "name":"Axes",
+            "parent":"None",
+            "Characteristics":["Body strength"]
+        },
+        {
+            "name":"hatchet",
+            "parent":"Axes",
+            "Characteristics":["None"]
+        },
+        {
+            "name":"Mining",
+            "parent":"None",
+            "Characteristics": ["Body strength"]
+        }
+    ]
+}
