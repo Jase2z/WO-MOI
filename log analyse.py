@@ -119,6 +119,7 @@ class ActionAttempt():
     start_time:datetime
     end_time:datetime
     action:Type[Action]
+    isRarity:bool=False
 
 
 EventStartMsg = namedtuple("EventStartMsg", "datetime action")
@@ -188,6 +189,8 @@ class EventLog():
         esm = None
         line_cnt = 0
         self._reset_line_gen()
+        _isRarity = False
+        rarity_time = None
         for line in islice(self.line_gen, self.start_line_index, None):
             # Get time and date from lines in log.
             # The date and time identifiers are on different lines. And date only appears on log in.
@@ -230,47 +233,63 @@ class EventLog():
                     f'Last datetime, {_datetime}. End message without start message, "{line.strip()}". line # {self.start_line_index + line_cnt}')
                 esm = None
                 continue
+            if line[11:].strip() == "You have a moment of inspiration...":
+                _isRarity = True
+                rarity_time = _datetime
+                continue
             if len(em) > 0:
-                action_attempts.append(ActionAttempt(esm.datetime, _datetime, em[0].action))
+                if rarity_time != None and rarity_time != _datetime:
+                    logger.warning(f"rarity time {rarity_time} vrs end time {_datetime} mismatch.")
+                action_attempts.append(ActionAttempt(esm.datetime, _datetime, em[0].action, _isRarity))
                 esm = None
+                rarity_time = None
+                _isRarity = False
+            
     
     def get_out_of_window(self, window_time: int) -> list:
         for ix in range(1, len(action_attempts)):
             compare_items(action_attempts[ix], action_attempts[ix - 1])
     
-    def get_stagger_durations(self) -> list[float]:
+    def get_stagger_durations(self) -> list[(float, int)]:
         ret = list(range(1, len(action_attempts)) 
-            | select(lambda x: action_attempts[x].start_time - action_attempts[x-1].start_time)
-            | select(lambda x: x.total_seconds()))
+            | select(lambda x:( 
+                    (action_attempts[x].start_time - action_attempts[x-1].start_time).total_seconds(), 
+                    x-1)))
         return ret
     
-    def get_action_durations(self) -> list[float]:
-        return list(action_attempts 
-                    | select(lambda x:(x.end_time - x.start_time).total_seconds()))
+    def get_action_durations(self) -> list[(float, int)]:
+        return list(range(0, len(action_attempts)) 
+                    | select(lambda x:((action_attempts[x].end_time - action_attempts[x].start_time).total_seconds(),
+                    x)))
                    
 
 if __name__ == "__main__":
+    #TODO This whole import section needs improvement. The primary goal is 
+    # have it so the code can fetch files from hosts like OneDrive or GoogleDrive. 
+    # A users provides direct download link and the code fetches it an does it thing.
+    # I also have a way to import a local path if the code was run locally. A command line 
+    # tool would be easier to deal with then something hosted on internet.
     embed = '<iframe src="https://onedrive.live.com/embed?cid=8BF93030BCC12554&resid=8BF93030BCC12554%211003&authkey=AFGGQYkSItv2XGM" width="98" height="120" frameborder="0" scrolling="no"></iframe>'
     h_tag = BeautifulSoup(embed, "html5lib")
     web = h_tag.iframe["src"].replace("embed", "download", 1)
     #https://1drv.ms/t/s!AlQlwbwwMPmLh2swsZEmt9SkmupZ?e=ttI16P
     #https://cdn.matix-media.net/dd/36be025d
-
     fil = Path(r'C:\Users\Jason\AppData\Local\Programs\Wurm Online\players\joedobo\logs\_Event.2022-09.txt')
+    ### END OF IMPORT SECTION. ###
+    
+
     el = EventLog(datetime.fromisoformat('2022-09-02T18:42:00'),
                 datetime.fromisoformat('2022-09-03T00:56:00'), file_path=fil)
     el.process_lines()
-    act_dur = el.get_action_durations()
     stag_dur = el.get_stagger_durations()
-
-    #TODO The duration lists aren't helpful explaining why a data point is what it is. 
-    # I need a way to go look at outrageous data points and see what happened.
-    # Maybe a named tuple with the data point and a indices references for its
-    # cause from action_attempts.
-
-    fig = plt.figure(figsize =(10, 7))
-    # Creating plot
-    plt.boxplot(stag_dur)
-    # show plot
-    plt.show()
+    stag_mean = np.mean(stag_dur, axis=0)[0]
+    
+    missed = list(stag_dur | where(lambda x: x[0] > 2 * stag_mean))
+    moi = list(range(0, len(action_attempts))
+            | where(lambda x: action_attempts[x].isRarity)
+            | select(lambda x: (action_attempts[x], x)))
     a = 1
+
+    #TODO Trying to use chances per item made is a problem because of variation in times. 
+    # And missed window length varies too. I need to focus on looking at the sample 
+    # in 30 second intervals. Was at least on action done in it? Where any actions rarity?
