@@ -7,6 +7,10 @@
         {
             "line":"You start to mine.",
             "action":"mine"
+        },
+        {
+            "line": "You start to work with the large anvil on the lump.",
+            "action": "create"
         }
     ],
     "end_messages":[
@@ -21,6 +25,10 @@
         {
             "line":"You mine some stone shards.",
             "action":"mine"
+        },
+        {
+            "line": "You create a horse shoe.",
+            "action": "create"
         }
     ]
 }

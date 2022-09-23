@@ -1,5 +1,8 @@
+from cgitb import reset
 from dataclasses import dataclass
 from datetime import datetime, date, time, timedelta
+from operator import ne
+from dateutil.relativedelta import *
 from typing import List, Tuple, Type
 from typing_extensions import Self
 from pathlib import Path, PurePath
@@ -7,11 +10,13 @@ from io import SEEK_END
 from re import search
 from itertools import islice
 from json import load as jsonload
+from xmlrpc.client import DateTime
 from pipe import select, where
 from bs4 import BeautifulSoup, SoupStrainer
 from requests import get
 from requests.exceptions import MissingSchema
 from collections import namedtuple
+from math import ceil
 import logging
 import logging.config
 import os
@@ -74,21 +79,6 @@ with open("actions.json", "r") as file:
         actions.append(Action(**entry))
 
 
-def search_timestamp(line: str) -> time:
-    _search = search(r"\[([0-9:]+)\]", line)
-    if _search is not None:
-        return time.fromisoformat(_search.group(1))
-    else:
-        return None
-
-def search_datestamp(line: str) -> date:
-    _search = search(r"Logging started ([0-9\-]+)", line)
-    if _search is not None:
-        return date.fromisoformat(_search.group(1))
-    else:
-        return None
-
-
 @dataclass
 class StartMessage:
     line:str
@@ -147,30 +137,52 @@ class EventLog():
         else:
             logger.error('no valid log data source provided.')
             return
+        self._get_start_index()
+        
+    def _get_start_index(self):
         # Find line index that has a time stamp which is at most equal to the start date.
         self.start_line_index = 0
         _time = _date = None
+        self.last_datetime = None
         self._reset_line_gen()
         for line in self.line_gen:
             self.start_line_index += 1
-            _date1 = search_datestamp(line)
-            if _date1 != None:
-                _date = _date1
+            if line == "\n":
                 continue
-            _time1 = search_timestamp(line)
-            if _time1 == None:
-                logger.critical('Time does not have valid time.')
+            _date, _time = self._time_stamp_import(line, _date, _time)
+            if _time is None:
+                continue
+            if _time is not None and _date is None:
+                logger.critical(f'No date found. line: {line}. index: {self.start_line_index}')
                 return
-            _time = _time1
+            _search = search(r"Logging started ", line)
+            if _search is not None:
+                continue
             _datetime = datetime.combine(_date, _time)
-            if _datetime < self.start_datetime:
+            if self.last_datetime is not None and _datetime < self.last_datetime:
+                # Wurm doesn't have data to identifying date lines for when time hits 24h marker.
+                _date += timedelta(days=1)
+                self.last_datetime = datetime.combine(_date, _time)
+            elif _datetime < self.start_datetime:
                 self.last_datetime = _datetime
-            if _datetime == self.start_datetime:
+            elif _datetime == self.start_datetime:
                 self.start_line_index -= 1
                 break
             elif _datetime > self.start_datetime:
                 self.start_line_index -= 1
                 break
+
+    def _time_stamp_import(self, line: str, _date: date, _time: time) -> list[date, time]:
+        _search = search(r"Logging started ([0-9\-]+)", line)
+        if _search is not None:
+            _date = date.fromisoformat(_search.group(1))
+            return [_date, _time]
+        _search = search(r"\[([0-9:]+)\]", line)
+        if _search is not None:
+            _time = time.fromisoformat(_search.group(1))
+            return [_date, _time]
+        logger.critical(f'error identify time stamp {line}')
+        return [None, None]
 
     def _reset_line_gen(self) -> None:
         if self.web_file != None:
@@ -181,7 +193,6 @@ class EventLog():
             logger.critical('no valid log data source provided.')
             return
 
-
     def process_lines(self):
         _time = self.last_datetime.time()
         _date = self.last_datetime.date()
@@ -191,33 +202,26 @@ class EventLog():
         self._reset_line_gen()
         _isRarity = False
         rarity_time = None
+        total_time = self.end_datetime - self.start_datetime
+
         for line in islice(self.line_gen, self.start_line_index, None):
-            # Get time and date from lines in log.
-            # The date and time identifiers are on different lines. And date only appears on log in.
-            # Logging started 2022-09-01
-            # [00:08:05] The shards doesn't fit.
             line_cnt += 1
-            _date1 = search_datestamp(line)
-            if _date1 != None:
-                _date = _date1
+            if line == "\n":
                 continue
-            _time1 = search_timestamp(line)
-            if _time1 == None:
-                # With the exception of line, "Logging started", their should always be a time stamp.
-                logger.error(
-                    f'Last datetime, {_datetime}. Invalid time stamp in, "{line.strip()}". line # {self.start_line_index + line_cnt}')
-                return
-            _time = _time1
-            _datetime1 = datetime.combine(_date, _time)
-            if _datetime1 < _datetime:
-                # Wurm doesn't have date identifying lines for when time hits 24h marker.
+            _date, _time = self._time_stamp_import(line, _date, _time)
+            _datetime = datetime.combine(_date, _time)
+            if _datetime < self.last_datetime:
+                # Wurm doesn't have data to identifying date lines for when time hits 24h marker.
                 _date += timedelta(days=1)
-                _datetime1 = datetime.combine(_date, _time)
+                self.last_datetime = _datetime = datetime.combine(_date, _time)
             else:
-                _datetime = _datetime1
+                self.last_datetime =  _datetime
             if self.end_datetime < _datetime:
                 break
             #  Identify and classify the line.
+            _search = search(r"Logging started ", line)
+            if _search is not None:
+                continue
             sm = list(start_messages | where(lambda x:x.line == line[11:].strip()))
             if len(sm) > 0 and esm != None:
                 logger.warning(
@@ -244,11 +248,6 @@ class EventLog():
                 esm = None
                 rarity_time = None
                 _isRarity = False
-            
-    
-    def get_out_of_window(self, window_time: int) -> list:
-        for ix in range(1, len(action_attempts)):
-            compare_items(action_attempts[ix], action_attempts[ix - 1])
     
     def get_stagger_durations(self) -> list[(float, int)]:
         ret = list(range(1, len(action_attempts)) 
@@ -261,7 +260,43 @@ class EventLog():
         return list(range(0, len(action_attempts)) 
                     | select(lambda x:((action_attempts[x].end_time - action_attempts[x].start_time).total_seconds(),
                     x)))
-                   
+
+    def __gen_window(self, interval: int, start: datetime, end: datetime):
+        _total = end - start
+        _window_cnt = ceil((end - start) / timedelta(seconds=30))
+        now = start
+        while now < end:
+            now += relativedelta(seconds=interval)
+            yield now
+    
+    def check_windows(self, interval: int) -> str:
+        g = self.__gen_window(interval, self.start_datetime, self.end_datetime)
+        #for w in g:
+        length = _window_cnt = ceil(
+            (self.end_datetime - self.start_datetime) / timedelta(seconds=interval))
+        #a = list(range(length) )
+
+        #a = list (iter(g) select( lambda x: ))
+        result = ""
+        start = 0
+        for dt in g:
+            matches = list()
+            gen_aa = (a for a in islice(range(len(action_attempts)), start, None, 1))
+            for aa in gen_aa:
+                if action_attempts[aa].start_time >= dt - relativedelta(seconds=30) and action_attempts[aa].start_time < dt:
+                    matches.append(action_attempts[aa])
+                if action_attempts[aa].start_time > dt:
+                    start = aa
+                    break
+            r = list(matches | where( lambda x: x.isRarity))
+            if not matches:
+                result += "W"
+            elif matches and r:
+                result += "R"
+            elif matches and not r:
+                result += "X"
+        return result
+        
 
 if __name__ == "__main__":
     #TODO This whole import section needs improvement. The primary goal is 
@@ -278,16 +313,22 @@ if __name__ == "__main__":
     ### END OF IMPORT SECTION. ###
     
 
-    el = EventLog(datetime.fromisoformat('2022-09-02T18:42:00'),
-                datetime.fromisoformat('2022-09-03T00:56:00'), file_path=fil)
+    el = EventLog(datetime.fromisoformat('2022-09-10T20:40:30'),
+                datetime.fromisoformat('2022-09-11T03:05:30'), file_path=fil)
+    total_seconds = el.end_datetime - el.start_datetime
     el.process_lines()
-    stag_dur = el.get_stagger_durations()
-    stag_mean = np.mean(stag_dur, axis=0)[0]
     
-    missed = list(stag_dur | where(lambda x: x[0] > 2 * stag_mean))
-    moi = list(range(0, len(action_attempts))
-            | where(lambda x: action_attempts[x].isRarity)
-            | select(lambda x: (action_attempts[x], x)))
+    result_str = el.check_windows(30)
+    
+    stag_dur = np.array(el.get_stagger_durations())
+    
+    stag_mean = np.mean(stag_dur, axis=0)[0]
+
+    fig = plt.figure(figsize =(10, 7))
+    # Creating plot
+    plt.boxplot(stag_dur[:,0], False, "")
+    # show plot
+    plt.show()
     a = 1
 
     #TODO Trying to use chances per item made is a problem because of variation in times. 
