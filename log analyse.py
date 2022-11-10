@@ -1,8 +1,8 @@
-from cgitb import reset
 from dataclasses import dataclass
-from datetime import datetime, date, time, timedelta
-from operator import ne
-from dateutil.relativedelta import *
+from datetime import datetime, date, time, timedelta, tzinfo, timezone
+from dateutil.relativedelta import relativedelta
+from dateutil import tz
+from tzinfo_examples import HOUR, Pacific
 from typing import List, Tuple, Type
 from typing_extensions import Self
 from pathlib import Path, PurePath
@@ -10,7 +10,6 @@ from io import SEEK_END
 from re import search
 from itertools import islice
 from json import load as jsonload
-from xmlrpc.client import DateTime
 from pipe import select, where
 from bs4 import BeautifulSoup, SoupStrainer
 from requests import get
@@ -41,7 +40,6 @@ def log_setup(log_cfg_path='log cfg.yaml'):
 
 log_setup()
 logger = logging.getLogger(__name__)
-
 
 def url_validate(url: str) -> get:
     try:
@@ -122,7 +120,19 @@ class EventLog():
         self.last_modified = None
         self.web_file = None
         self.start_datetime = start_datetime
-        self.end_datetime = end_datetime
+
+        self.tz_org = tz.gettz()
+
+        self.my_std = None
+        self.my_dst = None
+        for v in self.tz_org._tznames:
+            if "Standard" in v:
+                self.my_std = timezone(self.tz_org._std_offset, name='std')
+            elif "Daylight" in v:
+                self.my_dst = timezone(self.tz_org._dst_offset, name='dst') 
+
+        self.start_datetime = start_datetime.astimezone(self.tz_org).astimezone(tz.UTC)
+        self.end_datetime = end_datetime.astimezone(self.tz_org).astimezone(tz.UTC)
         if html_path != None:
             self.web_file = url_validate(html_path)
         elif file_path != None:
@@ -145,8 +155,7 @@ class EventLog():
         _time = _date = None
         self.last_datetime = None
         self._reset_line_gen()
-        for line in self.line_gen:
-            self.start_line_index += 1
+        for i, line in enumerate(self.line_gen):
             if line == "\n":
                 continue
             _date, _time = self._time_stamp_import(line, _date, _time)
@@ -155,22 +164,34 @@ class EventLog():
             if _time is not None and _date is None:
                 logger.critical(f'No date found. line: {line}. index: {self.start_line_index}')
                 return
+            _datetime = datetime.combine(_date, _time).astimezone(self.tz_org)
+            if i < 4 and self.last_datetime == None:
+                if tz.datetime_ambiguous(_datetime, self.tz_org):
+                    logger.critical('potential ambiguous time because of DST')
+                    return
+                self.last_datetime = _datetime.astimezone(tz.UTC)
             _search = search(r"Logging started ", line)
             if _search is not None:
                 continue
-            _datetime = datetime.combine(_date, _time)
+            if tz.datetime_ambiguous(datetime.combine(_date, _time), self.tz_org) \
+                and _datetime.astimezone(tz.UTC) < self.last_datetime:
+                    # Fall back,  standard time.
+                    _datetime = datetime.combine(_date, _time).astimezone(self.my_std) + HOUR
+            _datetime = _datetime.astimezone(tz.UTC)
             if self.last_datetime is not None and _datetime < self.last_datetime:
                 # Wurm doesn't have data to identifying date lines for when time hits 24h marker.
-                _date += timedelta(days=1)
-                self.last_datetime = datetime.combine(_date, _time)
+                _datetime += timedelta(days=1)
+                self.last_datetime = _datetime
             elif _datetime < self.start_datetime:
                 self.last_datetime = _datetime
+                self.start_line_index = i + 1
             elif _datetime == self.start_datetime:
-                self.start_line_index -= 1
+                self.start_line_index = i
                 break
             elif _datetime > self.start_datetime:
-                self.start_line_index -= 1
+                self.start_line_index = i
                 break
+
 
     def _time_stamp_import(self, line: str, _date: date, _time: time) -> list[date, time]:
         _search = search(r"Logging started ([0-9\-]+)", line)
@@ -194,28 +215,22 @@ class EventLog():
             return
 
     def process_lines(self):
-        _time = self.last_datetime.time()
-        _date = self.last_datetime.date()
-        _datetime = datetime.combine(_date, _time)
+        _time = self.last_datetime.astimezone(self.tz_org).time()
+        _date = self.last_datetime.astimezone(self.tz_org).date()
         esm = None
-        line_cnt = 0
         self._reset_line_gen()
         _isRarity = False
         rarity_time = None
-        total_time = self.end_datetime - self.start_datetime
 
-        for line in islice(self.line_gen, self.start_line_index, None):
-            line_cnt += 1
+        for i, line in enumerate(islice(self.line_gen, self.start_line_index, None)):
             if line == "\n":
                 continue
             _date, _time = self._time_stamp_import(line, _date, _time)
-            _datetime = datetime.combine(_date, _time)
+            _datetime =  datetime.combine(_date, _time).astimezone(self.tz_org).astimezone(tz.UTC)
             if _datetime < self.last_datetime:
                 # Wurm doesn't have data to identifying date lines for when time hits 24h marker.
-                _date += timedelta(days=1)
-                self.last_datetime = _datetime = datetime.combine(_date, _time)
-            else:
-                self.last_datetime =  _datetime
+                _datetime += timedelta(days=1)
+            self.last_datetime =  _datetime
             if self.end_datetime < _datetime:
                 break
             #  Identify and classify the line.
@@ -225,7 +240,7 @@ class EventLog():
             sm = list(start_messages | where(lambda x:x.line == line[11:].strip()))
             if len(sm) > 0 and esm != None:
                 logger.warning(
-                    f'Last datetime, {_datetime}. Second start message in, "{line.strip()}". line # {self.start_line_index + line_cnt}')
+                    f'Last datetime, {_datetime}. Second start message in, "{line.strip()}". line # {self.start_line_index + i}')
                 esm = None
                 continue
             if len(sm) > 0:
@@ -234,7 +249,7 @@ class EventLog():
             em = list(end_messages | where(lambda x:x.line == line[11:].strip()))
             if len(em) > 0 and esm == None:
                 logger.warning(
-                    f'Last datetime, {_datetime}. End message without start message, "{line.strip()}". line # {self.start_line_index + line_cnt}')
+                    f'Last datetime, {_datetime}. End message without start message, "{line.strip()}". line # {self.start_line_index + i}')
                 esm = None
                 continue
             if line[11:].strip() == "You have a moment of inspiration...":
@@ -309,12 +324,13 @@ if __name__ == "__main__":
     web = h_tag.iframe["src"].replace("embed", "download", 1)
     #https://1drv.ms/t/s!AlQlwbwwMPmLh2swsZEmt9SkmupZ?e=ttI16P
     #https://cdn.matix-media.net/dd/36be025d
-    fil = Path(r'C:\Users\Jason\AppData\Local\Programs\Wurm Online\players\joedobo\logs\_Event.2022-09.txt')
+    start = datetime.fromisoformat('2022-11-07T21:15:40')
+    end = datetime.fromisoformat('2022-11-08T06:28:23')
+    fil = Path(r'C:\Users\Jason\AppData\Local\Programs\Wurm Online\players\joedobo\logs' + f'\\_Event.2022-{start.month:02}.txt')
     ### END OF IMPORT SECTION. ###
     
 
-    el = EventLog(datetime.fromisoformat('2022-09-10T20:40:30'),
-                datetime.fromisoformat('2022-09-11T03:05:30'), file_path=fil)
+    el = EventLog(start, end, file_path=fil)
     total_seconds = el.end_datetime - el.start_datetime
     el.process_lines()
     

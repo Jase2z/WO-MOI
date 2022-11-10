@@ -11,6 +11,10 @@
         {
             "line": "You start to work with the large anvil on the lump.",
             "action": "create"
+        },
+        {
+            "line": "You start to work with the small anvil on the lump.",
+            "action": "create"
         }
     ],
     "end_messages":[
@@ -28,6 +32,10 @@
         },
         {
             "line": "You create a horse shoe.",
+            "action": "create"
+        },
+        {
+            "line": "You create a butchering knife blade.",
             "action": "create"
         }
     ]
